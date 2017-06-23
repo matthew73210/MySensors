@@ -1,0 +1,469 @@
+#define MY_RADIO_NRF24
+#include <MySensors.h> 
+#include <Wire.h>
+#include "BlueDot_BME280.h"
+#include <math.h>
+
+BlueDot_BME280 bme1;                                     //Object for Sensor 1
+
+
+int bme1Detected = 0;
+
+#define MY_REPEATER_FEATURE
+
+#define CHILD_ID_HUM 0
+#define CHILD_ID_TEMP 1
+#define CHILD_ID_BARO 2
+#define CHILD_ID_FORECAST 3
+#define CHILD_ID_DEW 4
+
+
+const float ALTITUDE = 400;
+
+const unsigned long SLEEP_TIME = 60000; 
+
+const char *weather[] = { "stable", "sunny", "cloudy", "unstable", "thunderstorm", "unknown" };
+enum FORECAST
+{
+  STABLE = 0,     // "Stable Weather Pattern"
+  SUNNY = 1,      // "Slowly rising Good Weather", "Clear/Sunny "
+  CLOUDY = 2,     // "Slowly falling L-Pressure ", "Cloudy/Rain "
+  UNSTABLE = 3,   // "Quickly rising H-Press",     "Not Stable"
+  THUNDERSTORM = 4, // "Quickly falling L-Press",    "Thunderstorm"
+  UNKNOWN = 5     // "Unknown (More Time needed)
+};
+
+float lastPressure = -1;
+float lastTemp = -1;
+float lastHum = -1;
+int lastForecast = -1;
+float lastDew = -1;
+
+const int LAST_SAMPLES_COUNT = 5;
+float lastPressureSamples[LAST_SAMPLES_COUNT];
+
+#define CONVERSION_FACTOR (1.0/10.0)
+
+int minuteCount = 0;
+bool firstRound = true;
+float pressureAvg;
+float pressureAvg2;
+
+float dP_dt;
+boolean metric;
+
+
+MyMessage msgHum(CHILD_ID_HUM, V_HUM);
+MyMessage msgTemp(CHILD_ID_TEMP, V_TEMP);
+MyMessage msgBaro(CHILD_ID_BARO, V_PRESSURE);
+MyMessage msgForecast(CHILD_ID_FORECAST, V_FORECAST);
+MyMessage msgDew(CHILD_ID_DEW, V_TEMP);
+
+
+
+float getLastPressureSamplesAverage()
+{
+  float lastPressureSamplesAverage = 0;
+  for (int i = 0; i < LAST_SAMPLES_COUNT; i++)
+  {
+    lastPressureSamplesAverage += lastPressureSamples[i];
+  }
+  lastPressureSamplesAverage /= LAST_SAMPLES_COUNT;
+
+  return lastPressureSamplesAverage;
+}
+
+
+// Algorithm found here
+// http://www.freescale.com/files/sensors/doc/app_note/AN3914.pdf
+// Pressure in hPa -->  forecast done by calculating kPa/h
+int sample(float pressure)
+{
+  // Calculate the average of the last n minutes.
+  int index = minuteCount % LAST_SAMPLES_COUNT;
+  lastPressureSamples[index] = pressure;
+
+  minuteCount++;
+  if (minuteCount > 185)
+  {
+    minuteCount = 6;
+  }
+
+  if (minuteCount == 5)
+  {
+    pressureAvg = getLastPressureSamplesAverage();
+  }
+  else if (minuteCount == 35)
+  {
+    float lastPressureAvg = getLastPressureSamplesAverage();
+    float change = (lastPressureAvg - pressureAvg) * CONVERSION_FACTOR;
+    if (firstRound) // first time initial 3 hour
+    {
+      dP_dt = change * 2; // note this is for t = 0.5hour
+    }
+    else
+    {
+      dP_dt = change / 1.5; // divide by 1.5 as this is the difference in time from 0 value.
+    }
+  }
+  else if (minuteCount == 65)
+  {
+    float lastPressureAvg = getLastPressureSamplesAverage();
+    float change = (lastPressureAvg - pressureAvg) * CONVERSION_FACTOR;
+    if (firstRound) //first time initial 3 hour
+    {
+      dP_dt = change; //note this is for t = 1 hour
+    }
+    else
+    {
+      dP_dt = change / 2; //divide by 2 as this is the difference in time from 0 value
+    }
+  }
+  else if (minuteCount == 95)
+  {
+    float lastPressureAvg = getLastPressureSamplesAverage();
+    float change = (lastPressureAvg - pressureAvg) * CONVERSION_FACTOR;
+    if (firstRound) // first time initial 3 hour
+    {
+      dP_dt = change / 1.5; // note this is for t = 1.5 hour
+    }
+    else
+    {
+      dP_dt = change / 2.5; // divide by 2.5 as this is the difference in time from 0 value
+    }
+  }
+  else if (minuteCount == 125)
+  {
+    float lastPressureAvg = getLastPressureSamplesAverage();
+    pressureAvg2 = lastPressureAvg; // store for later use.
+    float change = (lastPressureAvg - pressureAvg) * CONVERSION_FACTOR;
+    if (firstRound) // first time initial 3 hour
+    {
+      dP_dt = change / 2; // note this is for t = 2 hour
+    }
+    else
+    {
+      dP_dt = change / 3; // divide by 3 as this is the difference in time from 0 value
+    }
+  }
+  else if (minuteCount == 155)
+  {
+    float lastPressureAvg = getLastPressureSamplesAverage();
+    float change = (lastPressureAvg - pressureAvg) * CONVERSION_FACTOR;
+    if (firstRound) // first time initial 3 hour
+    {
+      dP_dt = change / 2.5; // note this is for t = 2.5 hour
+    }
+    else
+    {
+      dP_dt = change / 3.5; // divide by 3.5 as this is the difference in time from 0 value
+    }
+  }
+  else if (minuteCount == 185)
+  {
+    float lastPressureAvg = getLastPressureSamplesAverage();
+    float change = (lastPressureAvg - pressureAvg) * CONVERSION_FACTOR;
+    if (firstRound) // first time initial 3 hour
+    {
+      dP_dt = change / 3; // note this is for t = 3 hour
+    }
+    else
+    {
+      dP_dt = change / 4; // divide by 4 as this is the difference in time from 0 value
+    }
+    pressureAvg = pressureAvg2; // Equating the pressure at 0 to the pressure at 2 hour after 3 hours have past.
+    firstRound = false; // flag to let you know that this is on the past 3 hour mark. Initialized to 0 outside main loop.
+  }
+
+  int forecast = UNKNOWN;
+  if (minuteCount < 35 && firstRound) //if time is less than 35 min on the first 3 hour interval.
+  {
+    forecast = UNKNOWN;
+  }
+  else if (dP_dt < (-0.25))
+  {
+    forecast = THUNDERSTORM;
+  }
+  else if (dP_dt > 0.25)
+  {
+    forecast = UNSTABLE;
+  }
+  else if ((dP_dt > (-0.25)) && (dP_dt < (-0.05)))
+  {
+    forecast = CLOUDY;
+  }
+  else if ((dP_dt > 0.05) && (dP_dt < 0.25))
+  {
+    forecast = SUNNY;
+  }
+  else if ((dP_dt >(-0.05)) && (dP_dt < 0.05))
+  {
+    forecast = STABLE;
+  }
+  else
+  {
+    forecast = UNKNOWN;
+  }
+
+  // uncomment when debugging
+  //Serial.print(F("Forecast at minute "));
+  //Serial.print(minuteCount);
+  //Serial.print(F(" dP/dt = "));
+  //Serial.print(dP_dt);
+  //Serial.print(F("kPa/h --> "));
+  //Serial.println(weather[forecast]);
+
+  return forecast;
+}
+
+
+
+void presentation()  
+{ 
+
+  sendSketchInfo("bme280 weather station", "stable", 1);
+
+  present(CHILD_ID_HUM, S_HUM, "humidity");
+  present(CHILD_ID_TEMP, S_TEMP, "tempreture");
+  present(CHILD_ID_BARO, S_BARO, "pressure");
+  present(CHILD_ID_FORECAST, S_BARO, "weather forcast");
+  present(CHILD_ID_DEW, S_TEMP, "Dew point");
+
+}
+
+void setup() {
+    bme1.parameter.communication = 0;                    //Setting communication for Sensor 1 (bme1)
+ 
+  
+  //*********************************************************************  
+  //Set the I2C address of your breakout board   
+
+    bme1.parameter.I2CAddress = 0x77;                    //I2C Address for Sensor 1 (bme1)
+
+  //*********************************************************************  
+  //Now choose on which mode your device will run
+  //On doubt, just leave on normal mode, that's the default value
+  
+  //bme1.parameter.sensorMode = 0b00;                    //In sleep mode no measurements are performed, but power consumption is at a minimum
+  //bme1.parameter.sensorMode = 0b01;                    //In forced mode a single measured is performed and the device returns automatically to sleep mode
+    bme1.parameter.sensorMode = 0b11;                    //In normal mode the sensor measures continually (default value)
+    
+
+  //*********************************************************************
+  //Great! Now set up the internal IIR Filter
+  //The IIR (Infinite Impulse Response) filter suppresses high frequency fluctuations
+  //In short, a high factor value means less noise, but measurements are also less responsive
+  //You can play with these values and check the results!
+  //In doubt just leave on default
+  
+
+  //bme1.parameter.IIRfilter = 0b000;                   //factor 0 (filter off)
+  //bme1.parameter.IIRfilter = 0b001;                   //factor 2
+  //bme1.parameter.IIRfilter = 0b010;                   //factor 4
+  //bme1.parameter.IIRfilter = 0b011;                   //factor 8
+    bme1.parameter.IIRfilter = 0b101;                   //factor 16 (default value)
+
+  
+
+  //*********************************************************************
+  //Next you'll define the oversampling factor for the humidity measurements
+  //Again, higher values mean less noise, but slower responses
+  //If you don't want to measure humidity, set the oversampling to zero
+  
+  //bme1.parameter.humidOversampling = 0b000;            //factor 0 (Disable humidity measurement)
+  //bme1.parameter.humidOversampling = 0b001;            //factor 1
+  //bme1.parameter.humidOversampling = 0b010;            //factor 2
+  //bme1.parameter.humidOversampling = 0b011;            //factor 4
+  //bme1.parameter.humidOversampling = 0b100;            //factor 8
+    bme1.parameter.humidOversampling = 0b101;            //factor 16
+
+
+  //*********************************************************************
+  //Now define the oversampling factor for the temperature measurements
+  //You know now, higher values lead to less noise but slower measurements
+  
+  //bme1.parameter.tempOversampling = 0b000;              //factor 0 (Disable temperature measurement)
+  //bme1.parameter.tempOversampling = 0b001;              //factor 1
+  //bme1.parameter.tempOversampling = 0b010;              //factor 2
+  //bme1.parameter.tempOversampling = 0b011;              //factor 4
+  //bme1.parameter.tempOversampling = 0b100;              //factor 8
+    bme1.parameter.tempOversampling = 0b101;              //factor 16
+    
+ 
+
+  //*********************************************************************
+  //Finally, define the oversampling factor for the pressure measurements
+  //For altitude measurements a higher factor provides more stable values
+  //On doubt, just leave it on default
+  
+  //bme1.parameter.pressOversampling = 0b000;             //factor 0 (Disable pressure measurement)
+  //bme1.parameter.pressOversampling = 0b001;             //factor 1
+  //bme1.parameter.pressOversampling = 0b010;             //factor 2
+  //bme1.parameter.pressOversampling = 0b011;             //factor 4
+  //bme1.parameter.pressOversampling = 0b100;             //factor 8
+    bme1.parameter.pressOversampling = 0b101;             //factor 16
+    
+ 
+  //*********************************************************************
+  //For precise altitude measurements please put in the current pressure corrected for the sea level
+  //On doubt, just leave the standard pressure as default (1013.25 hPa);
+  
+    bme1.parameter.pressureSeaLevel = 1013.25;            //default value of 1013.25 hPa (Sensor 1)
+ 
+
+  //Also put in the current average temperature outside (yes, really outside!)
+  //For slightly less precise altitude measurements, just leave the standard temperature as default (15°C);
+  
+    bme1.parameter.tempOutsideCelsius = 15;               //default value of 15°C
+  //bme1.parameter.tempOutsideFahrenheit = 77;            //default value of 59°F
+
+  
+  //*********************************************************************
+
+  if (bme1.init() != 0x60)
+  {    
+    Serial.println(F("Ops! First BME280 Sensor not found!"));
+    Serial.println(F("Please check your connections."));
+    bme1Detected = 0;
+  }
+
+  else
+  {
+    Serial.println(F("First BME280 Sensor detected!"));
+    bme1Detected = 1;
+  }
+
+  
+    
+  Serial.println();
+  Serial.println();
+
+
+
+}
+
+//*********************************************************************
+void loop() {
+ 
+  Serial.print(F("Duration in Seconds:\t\t\t\t"));
+  Serial.println(float(millis())/1000);
+
+  if (bme1Detected)
+  {
+    Serial.print(F("Temperature in Celsius from Sensor 1:\t\t")); 
+    Serial.println(bme1.readTempC());
+    Serial.print(F("Temperature in Fahrenheit from Sensor 1:\t")); 
+    Serial.println(bme1.readTempF());
+    Serial.print(F("Humidity in % from Sensor 1:\t\t\t")); 
+    Serial.println(bme1.readHumidity());
+    Serial.print(F("Pressure in hPa from Sensor 1:\t\t\t")); 
+    Serial.println(bme1.readPressure());
+    Serial.print(F("Altitude in Meters from Sensor 1:\t\t")); 
+    Serial.println(bme1.readAltitudeMeter());
+    Serial.print(F("Altitude in Feet from Sensor 1:\t\t\t")); 
+    Serial.println(bme1.readAltitudeFeet());    
+  }
+
+  else
+  {
+    Serial.print(F("Temperature in Celsius from Sensor 1:\t\t")); 
+    Serial.println(F("Null"));
+    Serial.print(F("Temperature in Fahrenheit from Sensor 1:\t")); 
+    Serial.println(F("Null"));
+    Serial.print(F("Humidity in % from Sensor 1:\t\t\t")); 
+    Serial.println(F("Null"));
+    Serial.print(F("Pressure in hPa from Sensor 1:\t\t\t")); 
+    Serial.println(F("Null"));
+    Serial.print(F("Altitude in Meters from Sensor 1:\t\t")); 
+    Serial.println(F("Null"));
+    Serial.print(F("Altitude in Feet from Sensor 1:\t\t\t")); 
+    Serial.println(F("Null"));  
+  }
+
+ 
+   
+   Serial.println();
+   Serial.println();
+
+  float temperature = bme1.readTempC();                    // must get temp first
+  float humidity = bme1.readHumidity();
+  float pressure_local = bme1.readPressure();                    // Get pressure at current location
+  float pressure = pressure_local/pow((1.0 - ( ALTITUDE / 44330.0 )), 5.255); // Adjust to sea level pressure using user altitude
+  int forecast = sample(pressure);
+  
+  const float TempCoefficient = -0.15; //The temperature compensation coefficient value to guaratnee RH accuracy between 20-80%RH
+  const float DewConstA = 8.1332; //Constants required to calclulate the partial pressure and dew point. See datasheet page 16
+  const float DewConstB = 1762.39;
+  const float DewConstC = 235.66;
+
+  
+  float HumidityCompFL; //%RH value that has been temperature compensated to gurantee performance of +-3% between 20-80%RH
+  float ParitalPressureFL; //Calculated partial pressure in mmHg. used to calculate Dew Point.
+  float DewPointFL; //calculated Dew Point in degrees Celcius
+  float Dew;
+ 
+ //The relative humidty value read from directly from the chip is not the optimised value.
+ //We must perfrom the 'temperature Coefficient Compensation Equation" specified on page 4 of the datasheet
+ //RHcompensated = RHactual + (25 - TEMPactual) * coefficient
+ //The coefficient value is -0.15%RH/C - from page 3 of datasheet
+ HumidityCompFL = humidity +(25 - temperature) * TempCoefficient;
+ 
+ //To calculate the dew point, the partial pressure must be determined first. See datasheet page 16 for details.
+ //ParitalPress = 10 ^ (A - (B / (Temp + C)))
+ ParitalPressureFL = (DewConstA - (DewConstB / (temperature + DewConstC)));
+ ParitalPressureFL = pow(10, ParitalPressureFL);
+ 
+ //Dew point is calculated using the partial pressure, humidity and temperature.
+ //The datasheet on page 16 doesn't say to use the temperature compensated
+ //RH value and is ambiguous. It says "Ambient humidity in %RH, computed from HTU21D(F) sensor".
+ //However, as Bjoern Kasper pointed out, when considering a Moliere h-x-diagram, temperature compensated RH% should be used. 
+ 
+ //DewPoint = -(C + B/(log(RH * PartialPress /100) - A ))
+ //Arduino doesn't have a LOG base 10 function. But Arduino can use the AVRLibC libraries, so we'll use the "math.h".
+ DewPointFL = (HumidityCompFL * ParitalPressureFL / 100); //do the innermost brackets
+ DewPointFL = log10(DewPointFL) - DewConstA; //we have calculated the denominator of the equation
+ DewPointFL = DewConstB / DewPointFL; //the whole fraction of the equation has been calculated
+ DewPointFL = -(DewPointFL + DewConstC); //The whole dew point calculation has been performed
+ Dew = DewPointFL;
+ 
+
+  if (temperature != lastTemp) 
+  {
+    send(msgTemp.set(temperature, 1)); 
+    lastTemp = temperature;
+  }
+
+  if (Dew != lastDew) 
+  {
+  send(msgDew.set(Dew, 1));
+  lastDew = Dew;
+    
+  }
+  
+ 
+
+  if (humidity != lastHum) 
+  {
+    send(msgHum.set(humidity, 1));
+    lastHum = humidity;
+  }
+
+  if (pressure != lastPressure) 
+  {
+    send(msgBaro.set(pressure, 2));
+    lastPressure = pressure;
+  }
+
+  
+    send(msgForecast.set(weather[forecast]));
+    lastForecast = forecast;
+
+  
+  
+ 
+ 
+
+   delay(10000);
+   
+ 
+}
