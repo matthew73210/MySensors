@@ -18,7 +18,7 @@ int bme1Detected = 0;
 #define CHILD_ID_DEW 4
 
 
-const float ALTITUDE = 400;
+const float ALTITUDE = 173;
 
 const unsigned long SLEEP_TIME = 60000; 
 
@@ -463,7 +463,7 @@ void loop() {
  
  
 
-   delay(10000);
+   wait(10000);
    
  
 }
